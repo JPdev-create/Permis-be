@@ -420,7 +420,7 @@
   function resume() {
     if (!S.saved) return;
     const wasDone = S.saved.state === "done";
-    SES = { ...S.saved, retried: new Set(S.saved.retried || []), state: "ask", sel: null, guess: false, shownAt: now() };
+    SES = { ...S.saved, retried: new Set(S.saved.retried || []), state: "ask", sel: null, guess: false, shownAt: now(), deadline: null };
     if (wasDone) { if (SES.i + 1 < SES.items.length) SES.i++; else { finish(); return; } }
     go("#/play");
   }
@@ -519,14 +519,20 @@
     if (answered) { const fb = $(".feedback"); fb && fb.scrollIntoView({ behavior: "smooth", block: "nearest" }); }
   }
 
+  // Un seul chrono à la fois, basé sur une échéance fixe par question :
+  // toucher une réponse avant de valider ne relance pas le décompte.
   function startTimer() {
-    let left = S.timer;
-    const el = $("#timer");
-    timerId = setInterval(() => {
-      left--;
+    clearInterval(timerId);
+    if (!SES.deadline) SES.deadline = now() + S.timer * 1000;
+    const tick = () => {
+      if (!SES || SES.mode !== "exam") { clearInterval(timerId); return; }
+      const left = Math.max(0, Math.ceil((SES.deadline - now()) / 1000));
+      const el = $("#timer");
       if (el) { el.textContent = left; el.classList.toggle("hot", left <= 5); }
-      if (left <= 0) { clearInterval(timerId); SES.sel = null; examConfirm(true); }
-    }, 1000);
+      if (left <= 0) { clearInterval(timerId); examConfirm(true); }
+    };
+    tick();
+    timerId = setInterval(tick, 250);
   }
 
   function logEntry(it, q, sel, ok, extra = {}) {
@@ -549,13 +555,15 @@
   }
 
   function examConfirm(timeout) {
-    if (!SES || (!timeout && SES.sel == null)) return;
+    if (!SES || SES.mode !== "exam" || (!timeout && SES.sel == null)) return;
     clearInterval(timerId);
     const it = SES.items[SES.i], q = qOf(it);
+    // Temps écoulé : la réponse sélectionnée (non validée) est retenue ; sinon, pas de réponse.
     const ok = SES.sel === q.a;
     recordQ(q, ok, false);
-    SES.log.push(logEntry(it, q, SES.sel, ok, timeout ? { timeout: true } : {}));
+    SES.log.push(logEntry(it, q, SES.sel, ok, timeout && SES.sel == null ? { timeout: true } : {}));
     SES.sel = null;
+    SES.deadline = null;
     if (SES.i + 1 < SES.items.length) { SES.i++; SES.shownAt = now(); persistSes(); save(); vPlay(); }
     else finish();
   }
