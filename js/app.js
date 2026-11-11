@@ -26,7 +26,17 @@
   let pushTimer = null;
   function save(sync = true) {
     S.updatedAt = Date.now();
-    try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { /* plein ou bloqué */ }
+    try { localStorage.setItem(KEY, JSON.stringify(S)); }
+    catch (e) {
+      // Mémoire du navigateur pleine : on allège le détail des plus anciennes sessions/examens
+      // (les scores et la progression par question sont conservés), puis on réessaie.
+      try {
+        const old = (list, keep) => list.slice(0, Math.max(0, list.length - keep)).forEach((x) => { delete x.items; delete x.aiBilan; });
+        old(S.sessions, 20); old(S.exams, 30);
+        S.hist = S.hist.slice(-150);
+        localStorage.setItem(KEY, JSON.stringify(S));
+      } catch (e2) { /* stockage bloqué (navigation privée) : on continue en mémoire */ }
+    }
     if (sync && cloudUser()) { clearTimeout(pushTimer); pushTimer = setTimeout(pushState, 3000); }
   }
 
@@ -542,8 +552,14 @@
     return e;
   }
 
+  const tooSoon = () => SES && SES.shownAt && now() - SES.shownAt < 400; // tap « traversant » d'un double-tap
+  // Après un changement d'écran dans une session, on ignore brièvement tous les taps
+  // (sinon le 2e tap d'un double-tap tombe sur l'écran suivant : réponse, barre du bas…).
+  let tapGuardUntil = 0;
+  const guardTaps = () => { tapGuardUntil = now() + 400; };
+  document.addEventListener("click", (e) => { if (now() < tapGuardUntil && !e.target.closest(".modal")) { e.preventDefault(); e.stopPropagation(); } }, true);
   function pick(oi) {
-    if (!SES || SES.state === "done") return;
+    if (!SES || SES.state === "done" || tooSoon()) return;
     if (SES.mode === "exam") { SES.sel = oi; vPlay(); return; }
     const it = SES.items[SES.i], q = qOf(it);
     SES.sel = oi; SES.state = "done";
@@ -564,12 +580,14 @@
     SES.log.push(logEntry(it, q, SES.sel, ok, timeout && SES.sel == null ? { timeout: true } : {}));
     SES.sel = null;
     SES.deadline = null;
+    guardTaps();
     if (SES.i + 1 < SES.items.length) { SES.i++; SES.shownAt = now(); persistSes(); save(); vPlay(); }
     else finish();
   }
 
   function next() {
     if (!SES) return;
+    guardTaps();
     if (SES.i + 1 < SES.items.length) { SES.i++; SES.state = "ask"; SES.sel = null; SES.guess = false; SES.shownAt = now(); persistSes(); vPlay(); }
     else finish();
   }
@@ -648,7 +666,7 @@
       </div></div>`;
   }
   function spick(k) {
-    if (!SES || SES.state === "done") return;
+    if (!SES || SES.state === "done" || tooSoon()) return;
     const it = SES.items[SES.i];
     const ok = k === it.id;
     SES.sel = k; SES.state = "done";
@@ -715,23 +733,29 @@
   const strip = (h) => h.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
   const norm = (s) => s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
   let ruleQuery = "";
+  // La case de recherche n'est jamais recréée (sinon les claviers de téléphone perdent des lettres) :
+  // seule la zone des résultats change à chaque frappe.
   function vRules(id) {
     if (id) return vChapter(id);
-    const qn = norm(ruleQuery.trim());
-    let results = "";
+    app.innerHTML = `<h1 class="page-h">Livre des règles</h1>
+      <div class="search"><input id="rq" type="search" placeholder="Chercher une règle : tirette, disque, 1,5 m, alcool…" value="${esc(ruleQuery)}" autocomplete="off" enterkeyhint="search"></div>
+      <div id="rres"></div>`;
+    const inp = $("#rq"), box = $("#rres");
+    const show = () => { box.innerHTML = rulesResults(ruleQuery); enhance(box); };
+    inp.addEventListener("input", () => { ruleQuery = inp.value; show(); });
+    inp.addEventListener("keydown", (e) => { if (e.key === "Enter") inp.blur(); });
+    show();
+  }
+  function rulesResults(query) {
+    const qn = norm(query.trim());
     if (qn.length >= 2) {
       const hits = [];
       RB.forEach((c) => c.sections.forEach((s, i) => { const txt = strip(s.html); const n = norm(s.t + " " + txt); if (n.includes(qn)) { const pos = norm(txt).indexOf(qn); const ex = pos >= 0 ? txt.slice(Math.max(0, pos - 60), pos + 120) : txt.slice(0, 160); hits.push({ c, s, i, ex }); } }));
-      results = `<h2>${plural(hits.length, "résultat")}</h2><div class="list">${hits.slice(0, 40).map((h) => `<a class="row" href="#/regles/${h.c.id}/${h.i}"><span class="ti">${h.c.icon}</span><span class="grow"><b>${esc(h.s.t)}</b><small>${esc(h.c.titre)} · …${esc(h.ex)}…</small></span></a>`).join("")}</div>`;
+      return `<h2>${plural(hits.length, "résultat")}</h2><div class="list">${hits.slice(0, 40).map((h) => `<a class="row" href="#/regles/${h.c.id}/${h.i}"><span class="ti">${h.c.icon}</span><span class="grow"><b>${esc(h.s.t)}</b><small>${esc(h.c.titre)} · …${esc(h.ex)}…</small></span></a>`).join("")}</div>${hits.length ? "" : `<p class="muted">Essaie un autre mot (par exemple « priorité », « stationnement », « enfant »).</p>`}`;
     }
-    app.innerHTML = `<h1 class="page-h">Livre des règles</h1>
-      <div class="search"><input id="rq" type="search" placeholder="Chercher une règle : tirette, disque, 1,5 m, alcool…" value="${esc(ruleQuery)}" autocomplete="off"></div>
-      ${results}
-      ${!results ? `<h2>Fiches express</h2><div class="hscroll">${L.map((l) => `<a class="mini-card" href="#/fiche/${l.id}"><b>${esc(l.titre)}</b><small>${esc(l.intro)}</small></a>`).join("")}</div>
-      <h2>Chapitres</h2><div class="lessons">${RB.map((c) => { const s = themeStats(c.theme); return `<a class="lesson-card" href="#/regles/${c.id}"><span class="ti">${c.icon}</span><span class="grow"><b>${esc(c.titre)}</b><small>${c.sections.map((x) => esc(x.t)).join(" · ")}</small>${bar(pct(s.mastered, s.total))}</span></a>`; }).join("")}</div>
-      <button class="btn full" data-act="tutor-free">🤖 Poser une question au prof IA</button>` : ""}`;
-    const inp = $("#rq");
-    inp.addEventListener("input", () => { ruleQuery = inp.value; const pos = inp.selectionStart; vRules(); const n = $("#rq"); n.focus(); n.setSelectionRange(pos, pos); });
+    return `<h2>Fiches express</h2><div class="hscroll">${L.map((l) => `<a class="mini-card" href="#/fiche/${l.id}"><b>${esc(l.titre)}</b><small>${esc(l.intro)}</small></a>`).join("")}</div>
+      <h2>Chapitres</h2><div class="lessons">${RB.map((c) => { const st = themeStats(c.theme); return `<a class="lesson-card" href="#/regles/${c.id}"><span class="ti">${c.icon}</span><span class="grow"><b>${esc(c.titre)}</b><small>${c.sections.map((x) => esc(x.t)).join(" · ")}</small>${bar(pct(st.mastered, st.total))}</span></a>`; }).join("")}</div>
+      <button class="btn full" data-act="tutor-free">🤖 Poser une question au prof IA</button>`;
   }
   function vChapter(arg) {
     const [cid, sec] = arg.split("/");
